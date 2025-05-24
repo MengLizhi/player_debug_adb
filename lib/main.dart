@@ -1,4 +1,10 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:process_run/shell.dart';
+import 'package:file_picker/file_picker.dart';
+import 'adb_manager.dart';
 
 void main() {
   runApp(const MyApp());
@@ -7,45 +13,20 @@ void main() {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'ADB Device Manager',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const MyHomePage(title: 'ADB Device Manager'),
     );
   }
 }
 
 class MyHomePage extends StatefulWidget {
   const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
 
   final String title;
 
@@ -54,69 +35,228 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+  final AdbManager _adbManager = AdbManager();
+  List<String> _devices = [];
+  bool _isLoading = false;
+  final TextEditingController _ipController = TextEditingController();
+  final TextEditingController _portController = TextEditingController(text: '5555');
 
-  void _incrementCounter() {
+  @override
+  void dispose() {
+    _ipController.dispose();
+    _portController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _showConnectDialog() async {
+    return showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('连接设备'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _ipController,
+              decoration: const InputDecoration(
+                labelText: 'IP地址',
+                hintText: '例如: 192.168.1.100',
+              ),
+            ),
+            TextField(
+              controller: _portController,
+              decoration: const InputDecoration(
+                labelText: '端口',
+                hintText: '默认: 5555',
+              ),
+              keyboardType: TextInputType.number,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _connectDevice(_ipController.text, _portController.text);
+            },
+            child: const Text('连接'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _connectDevice(String ip, String port) async {
+    if (!_adbManager.isAdbPathSet) {
+      await _selectAdbPath();
+      return;
+    }
+
+    if (ip.isEmpty) {
+      _showResultDialog(false, '请输入IP地址');
+      return;
+    }
+
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _isLoading = true;
     });
+
+    try {
+      var shell = Shell(runInShell: true, stdoutEncoding: const SystemEncoding(), stderrEncoding: const SystemEncoding());
+      // 执行连接命令并获取输出
+      var result = await shell.run('"${_adbManager.adbPath}" connect $ip:$port');
+      
+      // 获取输出内容（优先使用stderr，因为错误信息通常在stderr中）
+      String output = '';
+      if (result.first.stderr.isNotEmpty) {
+        var bytes = result.first.stderr.codeUnits;
+        output = const SystemEncoding().decode(bytes);
+      } else {
+        var bytes = result.first.stdout.codeUnits;
+        output = const SystemEncoding().decode(bytes);
+      }
+      
+      // 清理输出内容
+      output = output.trim();
+      
+      // 分析输出结果
+      if (output.contains('connected') || output.contains('already connected')) {
+        _showResultDialog(true, '设备连接成功');
+        // 连接成功后刷新设备列表
+        await _getDevices();
+      } else {
+        _showResultDialog(false, '连接失败：$output');
+      }
+    } catch (e) {
+      debugPrint('Error: $e');
+      String errorMsg = e.toString();
+      _showResultDialog(false, '连接错误：$errorMsg');
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _showResultDialog(bool success, String message) {
+    if (!mounted) return;
+    
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(success ? '连接成功' : '连接失败'),
+        content: Text(message),
+        icon: Icon(
+          success ? Icons.check_circle : Icons.error,
+          color: success ? Colors.green : Colors.red,
+          size: 48,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _selectAdbPath() async {
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['exe'],
+      dialogTitle: '选择adb.exe文件',
+    );
+
+    if (result != null) {
+      _adbManager.adbPath = result.files.single.path;
+      _getDevices(); // 重新获取设备列表
+    }
+  }
+
+  Future<void> _getDevices() async {
+    if (!_adbManager.isAdbPathSet) {
+      await _selectAdbPath();
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      var shell = Shell();
+      var result = await shell.run('"${_adbManager.adbPath}" devices');
+      var output = result.first.stdout.toString();
+      var lines = output.split('\n');
+      
+      var devices = lines
+          .skip(1)
+          .where((line) => line.trim().isNotEmpty)
+          .map((line) => line.split('\t').first)
+          .toList();
+
+      setState(() {
+        _devices = devices;
+      });
+    } catch (e) {
+      debugPrint('Error: $e');
+      // 如果执行出错，可能是ADB路径无效，提示用户重新选择
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('执行ADB命令失败，请重新选择ADB文件')),
+        );
+      }
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
         title: Text(widget.title),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.add),
+            onPressed: _showConnectDialog,
+            tooltip: '添加设备',
+          ),
+          IconButton(
+            icon: const Icon(Icons.folder_open),
+            onPressed: _selectAdbPath,
+            tooltip: '选择ADB文件',
+          ),
+        ],
       ),
       body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
-        ),
+        child: _isLoading
+            ? const CircularProgressIndicator()
+            : _devices.isEmpty
+                ? const Text('没有找到已连接的设备')
+                : ListView.builder(
+                    itemCount: _devices.length,
+                    itemBuilder: (context, index) {
+                      return ListTile(
+                        leading: const Icon(Icons.phone_android),
+                        title: Text(_devices[index]),
+                      );
+                    },
+                  ),
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
+        onPressed: _getDevices,
+        tooltip: '刷新设备列表',
+        child: const Icon(Icons.refresh),
+      ),
     );
   }
 }
