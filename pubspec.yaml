@@ -32,10 +32,12 @@ dependencies:
     sdk: flutter
   process_run: ^0.13.3
   file_picker: ^6.1.1
+  xterm: ^4.0.0
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  data_table_2: ^2.5.10 # Add data_table_2 for fixed header DataTable
 
 dev_dependencies:
   flutter_test:
